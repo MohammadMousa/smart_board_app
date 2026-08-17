@@ -24,6 +24,12 @@ class CanvasNote {
   // Status Emoji/Badge
   String? statusBadge;
 
+  // Visual/UI state. Persist these values with the note when board
+  // persistence is implemented.
+  int? highlightColorValue;
+  bool isCollapsed = false;
+  int zIndex = 0;
+
   CanvasNote({
     required this.id,
     this.title = '',
@@ -37,10 +43,18 @@ class CanvasNote {
     this.imageUrl = '',
     this.imageFit = ImageFitMode.contain,
     this.statusBadge,
+    this.highlightColorValue,
+    this.isCollapsed = false,
+    this.zIndex = 0,
   }) : tableData = tableData ?? [
     ['Header 1', 'Header 2'],
     ['Row 1 Cell 1', 'Row 1 Cell 2'],
   ];
+
+  double get renderHeight => isCollapsed ? 72.0 : height;
+
+  Color? get highlightColor =>
+      highlightColorValue == null ? null : Color(highlightColorValue!);
 
   BoxFit get fitAsBoxFit {
     switch (imageFit) {

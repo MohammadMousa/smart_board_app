@@ -11,8 +11,15 @@ final GlobalKey _viewportKey = GlobalKey();
 
 class InteractiveBoard extends StatelessWidget {
   final TransformationController transformationController;
+  final Widget? overlay;
+  final bool interactionLocked;
 
-  const InteractiveBoard({super.key, required this.transformationController});
+  const InteractiveBoard({
+    super.key,
+    required this.transformationController,
+    this.overlay,
+    this.interactionLocked = false,
+  });
 
   Offset _getScenePosition(Offset globalPos) {
     final renderBox = _viewportKey.currentContext?.findRenderObject() as RenderBox?;
@@ -27,8 +34,8 @@ class InteractiveBoard extends StatelessWidget {
       final target = provider.notes.firstWhere((n) => n.id == conn.targetNodeId, orElse: () => CanvasNote(id: '', x: 0, y: 0));
 
       if (source.id.isNotEmpty && target.id.isNotEmpty) {
-        final start = Offset(source.x + source.width + 20, source.y + (source.height / 2));
-        final end = Offset(target.x - 20, target.y + (target.height / 2));
+        final start = Offset(source.x + source.width + 20, source.y + (source.renderHeight / 2));
+        final end = Offset(target.x - 20, target.y + (target.renderHeight / 2));
 
         if (_isPointNearBezier(scenePos, start, end, 16.0)) {
           return conn.id;
@@ -86,11 +93,11 @@ class InteractiveBoard extends StatelessWidget {
 
     final start = Offset(
       source.x + source.width + 20,
-      source.y + source.height / 2,
+      source.y + source.renderHeight / 2,
     );
     final end = Offset(
       target.x - 20,
-      target.y + target.height / 2,
+      target.y + target.renderHeight / 2,
     );
 
     final midpoint = Offset(
@@ -130,6 +137,8 @@ class InteractiveBoard extends StatelessWidget {
         minScale: 0.2,
         maxScale: 2.5,
         constrained: false,
+        panEnabled: !interactionLocked,
+        scaleEnabled: !interactionLocked,
         child: SizedBox(
           width: 10000,
           height: 10000,
@@ -161,16 +170,21 @@ class InteractiveBoard extends StatelessWidget {
                   ),
                 ),
               ),
-              ...boardProvider.notes.map((note) {
-                return Positioned(
-                  left: note.x,
-                  top: note.y,
-                  child: _NoteCard(
-                    note: note,
-                    transformationController: transformationController,
-                  ),
-                );
-              }),
+              ...(() {
+                final orderedNotes = [...boardProvider.notes]
+                  ..sort((a, b) => a.zIndex.compareTo(b.zIndex));
+                return orderedNotes.map((note) {
+                  return Positioned(
+                    left: note.x,
+                    top: note.y,
+                    child: _NoteCard(
+                      key: ValueKey(note.id),
+                      note: note,
+                      transformationController: transformationController,
+                    ),
+                  );
+                });
+              })(),
 
               // Real interactive remove control. It is positioned from the
               // same curve geometry used by the painter, so it stays attached
@@ -178,6 +192,7 @@ class InteractiveBoard extends StatelessWidget {
               if (boardProvider.hoveredConnectionId != null)
                 ..._buildRemoveButton(boardProvider),
 
+              if (overlay != null) overlay!,
             ],
           ),
         ),
@@ -192,7 +207,7 @@ class _NoteCard extends StatefulWidget {
 
   const _NoteCard({
     required this.note,
-    required this.transformationController,
+    required this.transformationController, required ValueKey<String> key,
   });
 
   @override
@@ -227,6 +242,8 @@ class _NoteCardState extends State<_NoteCard> {
     final boardProvider = context.watch<BoardProvider>();
     final currentScale = widget.transformationController.value.getMaxScaleOnAxis();
     final isActiveSource = boardProvider.activeSourceNoteId == widget.note.id;
+    final displayHeight = widget.note.renderHeight;
+    final highlight = widget.note.highlightColor;
 
     return Stack(
       clipBehavior: Clip.none,
@@ -237,10 +254,12 @@ class _NoteCardState extends State<_NoteCard> {
           },
           child: Container(
             width: widget.note.width,
-            height: widget.note.height,
+            height: displayHeight,
             padding: const EdgeInsets.all(12),
             decoration: BoxDecoration(
-              color: const Color(0xFF252526),
+              color: highlight == null
+                  ? const Color(0xFF252526)
+                  : Color.alphaBlend(highlight!.withOpacity(0.24), const Color(0xFF252526)),
               borderRadius: BorderRadius.circular(10),
               border: Border.all(
                 color: isActiveSource ? Colors.amberAccent : Colors.blueAccent.withOpacity(0.6),
@@ -285,20 +304,42 @@ class _NoteCardState extends State<_NoteCard> {
                       },
                     ),
                     IconButton(
+                      tooltip: 'Move note up one layer',
+                      icon: const Icon(Icons.vertical_align_top, size: 16, color: Colors.white54),
+                      onPressed: () => boardProvider.moveNoteUp(widget.note.id),
+                    ),
+                    IconButton(
+                      tooltip: 'Move note down one layer',
+                      icon: const Icon(Icons.vertical_align_bottom, size: 16, color: Colors.white54),
+                      onPressed: () => boardProvider.moveNoteDown(widget.note.id),
+                    ),
+                    IconButton(
+                      tooltip: widget.note.isCollapsed ? 'Expand note' : 'Collapse note',
+                      icon: Icon(
+                        widget.note.isCollapsed ? Icons.unfold_more : Icons.unfold_less,
+                        size: 15,
+                        color: Colors.white54,
+                      ),
+                      onPressed: () => boardProvider.toggleNoteCollapsed(widget.note.id),
+                    ),
+                    IconButton(
+                      tooltip: 'Remove note',
                       icon: const Icon(Icons.close, size: 14, color: Colors.white54),
                       onPressed: () => boardProvider.removeNote(widget.note.id),
                     ),
                   ],
                 ),
-                const Divider(color: Colors.white12, height: 10),
-                Expanded(child: CardBody(note: widget.note)),
+                if (!widget.note.isCollapsed) ...[
+                  const Divider(color: Colors.white12, height: 10),
+                  Expanded(child: CardBody(note: widget.note)),
+                ],
               ],
             ),
           ),
         ),
 
         // Resize Handle
-        Positioned(
+        if (!widget.note.isCollapsed) Positioned(
           right: -4,
           bottom: -4,
           child: GestureDetector(
@@ -319,7 +360,7 @@ class _NoteCardState extends State<_NoteCard> {
         // Left Input Port (Expanded 44x44 Click Target)
         Positioned(
           left: -22,
-          top: (widget.note.height / 2) - 22,
+          top: (displayHeight / 2) - 22,
           child: GestureDetector(
             behavior: HitTestBehavior.opaque,
             onTap: () => boardProvider.handleInputPortClick(widget.note.id),
@@ -349,11 +390,11 @@ class _NoteCardState extends State<_NoteCard> {
         // Right Output Port (Expanded 44x44 Click Target)
         Positioned(
           right: -22,
-          top: (widget.note.height / 2) - 22,
+          top: (displayHeight / 2) - 22,
           child: GestureDetector(
             behavior: HitTestBehavior.opaque,
             onTap: () {
-              final portPos = Offset(widget.note.x + widget.note.width + 20, widget.note.y + (widget.note.height / 2));
+              final portPos = Offset(widget.note.x + widget.note.width + 20, widget.note.y + (displayHeight / 2));
               boardProvider.handleOutputPortClick(widget.note.id, portPos);
             },
             child: MouseRegion(

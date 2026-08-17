@@ -42,8 +42,8 @@ class CanvasPainter extends CustomPainter {
       final target = notes.firstWhere((n) => n.id == conn.targetNodeId, orElse: () => CanvasNote(id: '', x: 0, y: 0));
 
       if (source.id.isNotEmpty && target.id.isNotEmpty) {
-        final start = Offset(source.x + source.width + 20, source.y + (source.height / 2));
-        final end = Offset(target.x - 20, target.y + (target.height / 2));
+        final start = Offset(source.x + source.width + 20, source.y + (source.renderHeight / 2));
+        final end = Offset(target.x - 20, target.y + (target.renderHeight / 2));
         final isHovered = conn.id == hoveredConnectionId;
 
         _drawBezierCurve(canvas, start, end, isHovered ? hoverWirePaint : wirePaint, conn.style);
@@ -54,7 +54,7 @@ class CanvasPainter extends CustomPainter {
     if (activeSourceNoteId != null && hoverCursorPos != null) {
       final source = notes.firstWhere((n) => n.id == activeSourceNoteId, orElse: () => CanvasNote(id: '', x: 0, y: 0));
       if (source.id.isNotEmpty) {
-        final start = Offset(source.x + source.width + 20, source.y + (source.height / 2));
+        final start = Offset(source.x + source.width + 20, source.y + (source.renderHeight / 2));
         _drawBezierCurve(canvas, start, hoverCursorPos!, activeWirePaint, activeWireStyle);
       }
     }

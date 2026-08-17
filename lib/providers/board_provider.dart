@@ -96,6 +96,12 @@ class BoardProvider extends ChangeNotifier {
     if (note.title.trim().isEmpty) {
       note.title = _nextNoteTitle();
     }
+
+    final maxZ = activeTab.notes.fold<int>(
+      -1,
+      (max, existing) => existing.zIndex > max ? existing.zIndex : max,
+    );
+    note.zIndex = maxZ + 1;
     activeTab.notes.add(note);
     notifyListeners();
   }
@@ -152,6 +158,54 @@ class BoardProvider extends ChangeNotifier {
       activeTab.notes[index].title = newTitle;
       notifyListeners();
     }
+  }
+
+  void setNoteHighlight(String id, int? colorValue) {
+    final index = activeTab.notes.indexWhere((n) => n.id == id);
+    if (index != -1) {
+      activeTab.notes[index].highlightColorValue = colorValue;
+      notifyListeners();
+    }
+  }
+
+  void toggleNoteCollapsed(String id) {
+    final index = activeTab.notes.indexWhere((n) => n.id == id);
+    if (index != -1) {
+      activeTab.notes[index].isCollapsed = !activeTab.notes[index].isCollapsed;
+      notifyListeners();
+    }
+  }
+
+  void moveNoteUp(String id) {
+    _moveNoteByLayer(id, 1);
+  }
+
+  void moveNoteDown(String id) {
+    _moveNoteByLayer(id, -1);
+  }
+
+  void _moveNoteByLayer(String id, int direction) {
+    final ordered = [...activeTab.notes]
+      ..sort((a, b) => a.zIndex.compareTo(b.zIndex));
+
+    // Older notes may have been created before z-indexes were introduced.
+    // Normalize only the ordering values; never touch note content or state.
+    for (var i = 0; i < ordered.length; i++) {
+      ordered[i].zIndex = i;
+    }
+
+    final currentIndex = ordered.indexWhere((note) => note.id == id);
+    if (currentIndex == -1) return;
+
+    final targetIndex = currentIndex + direction;
+    if (targetIndex < 0 || targetIndex >= ordered.length) return;
+
+    final current = ordered[currentIndex];
+    final target = ordered[targetIndex];
+    final oldZ = current.zIndex;
+    current.zIndex = target.zIndex;
+    target.zIndex = oldZ;
+    notifyListeners();
   }
 
   void setNoteBadge(String id, String? emoji) {

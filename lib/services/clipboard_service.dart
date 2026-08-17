@@ -42,15 +42,19 @@ class ClipboardService {
 
     // Text is deliberately independent from image handling.
     try {
-      final pasteboardText = await Pasteboard.text;
-      final rawText = pasteboardText ?? await _flutterClipboardText();
-
+      // Flutter's plain-text clipboard API is used first because it returns
+      // the original text payload without normalizing spaces/newlines.
+      final rawText = await _flutterClipboardText() ?? await Pasteboard.text;
       if (rawText == null || rawText.isEmpty) return null;
       return _noteFromText(rawText, targetX, targetY);
     } catch (_) {
-      final rawText = await _flutterClipboardText();
-      if (rawText == null || rawText.isEmpty) return null;
-      return _noteFromText(rawText, targetX, targetY);
+      try {
+        final rawText = await Pasteboard.text;
+        if (rawText == null || rawText.isEmpty) return null;
+        return _noteFromText(rawText, targetX, targetY);
+      } catch (_) {
+        return null;
+      }
     }
   }
 

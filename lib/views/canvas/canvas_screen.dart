@@ -1,13 +1,13 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
-import 'dart:math' as math;
 import 'package:uuid/uuid.dart';
 import '../../models/canvas_item.dart';
 import '../../models/connection.dart';
 import '../../models/drawing_point.dart';
 import '../../providers/board_provider.dart';
 import '../../services/clipboard_service.dart';
+import '../../services/board_export_service.dart';
 import '../auth/auth_dialog.dart';
 import 'interactive_board.dart';
 import 'widgets/zoom_controls.dart';
@@ -23,10 +23,13 @@ class _CanvasScreenState extends State<CanvasScreen> {
   final FocusNode _focusNode = FocusNode();
   final TransformationController _transformationController = TransformationController();
   final _uuid = const Uuid();
+  final GlobalKey _boardExportKey = GlobalKey();
+  final ValueNotifier<int> _drawingRevision = ValueNotifier<int>(0);
   double _lastX = 300.0;
   double _lastY = 200.0;
 
   bool _isPenActive = false;
+  bool _isExporting = false;
   bool _isPenEraser = false;
   final List<DrawingPoint?> _drawingPoints = [];
   Offset? _lastPenPoint;
@@ -48,7 +51,7 @@ class _CanvasScreenState extends State<CanvasScreen> {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           duration: Duration(seconds: 3),
-          content: Text('Magic Pen active — drawing is locked until you tap Save or Pen again.'),
+          content: Text('Magic Pen active — canvas locked for drawing. Save exports a PNG and keeps Pen mode active.'),
         ),
       );
     }
@@ -62,11 +65,8 @@ class _CanvasScreenState extends State<CanvasScreen> {
       return;
     }
 
-    setState(() {
-      _drawingPoints.add(
-        DrawingPoint(offset: point, paint: _penPaint),
-      );
-    });
+    _drawingPoints.add(DrawingPoint(offset: point, paint: _penPaint));
+    _drawingRevision.value++;
   }
 
   void _movePen(Offset point) {
@@ -84,34 +84,37 @@ class _CanvasScreenState extends State<CanvasScreen> {
     }
 
     final distance = (point - previous).distance;
-    if (distance < 0.8) return;
+    if (distance < 0.5) return;
 
-    // Pointer events can arrive farther apart than the visual stroke should
-    // be. Interpolating the gap makes the pen feel attached to the cursor.
-    final steps = math.max(1, (distance / 3.0).ceil());
-    setState(() {
-      for (var i = 1; i <= steps; i++) {
-        final t = i / steps;
-        final p = Offset(
-          previous.dx + (point.dx - previous.dx) * t,
-          previous.dy + (point.dy - previous.dy) * t,
-        );
-        _drawingPoints.add(
-          DrawingPoint(offset: p, paint: _penPaint),
-        );
-      }
-    });
+    // Store enough points to keep fast mouse movements attached to the
+    // cursor. The painter draws a continuous smoothed path, while the list
+    // itself is mutated without rebuilding the entire canvas on every event.
+    final steps = mathMax(1, distance.ceil());
+    for (var i = 1; i <= steps; i++) {
+      final t = i / steps;
+      _drawingPoints.add(
+        DrawingPoint(
+          offset: Offset(
+            previous.dx + (point.dx - previous.dx) * t,
+            previous.dy + (point.dy - previous.dy) * t,
+          ),
+          paint: _penPaint,
+        ),
+      );
+    }
+    _drawingRevision.value++;
   }
 
   void _endPenStroke() {
     _lastPenPoint = null;
     if (!_isPenEraser && _drawingPoints.isNotEmpty && _drawingPoints.last != null) {
-      setState(() => _drawingPoints.add(null));
+      _drawingPoints.add(null);
+      _drawingRevision.value++;
     }
   }
 
   void _eraseAt(Offset point) {
-    const radius = 18.0;
+    const radius = 20.0;
 
     for (var i = 0; i < _drawingPoints.length; i++) {
       final current = _drawingPoints[i];
@@ -128,40 +131,85 @@ class _CanvasScreenState extends State<CanvasScreen> {
           end++;
         }
 
-        setState(() {
-          _drawingPoints.removeRange(start, end + 1);
-          if (start < _drawingPoints.length && _drawingPoints[start] == null) {
-            _drawingPoints.removeAt(start);
-          }
-        });
+        _drawingPoints.removeRange(start, end + 1);
+        if (start < _drawingPoints.length && _drawingPoints[start] == null) {
+          _drawingPoints.removeAt(start);
+        }
+        _drawingRevision.value++;
         return;
       }
     }
   }
 
   void _clearDrawing() {
-    setState(() => _drawingPoints.clear());
+    _drawingPoints.clear();
+    _drawingRevision.value++;
   }
 
-  void _saveDrawing() {
-    setState(() {
-      _isPenActive = false;
-      _isPenEraser = false;
-      _lastPenPoint = null;
-    });
+  Future<void> _saveDrawing() async {
+    if (_drawingPoints.isEmpty) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Nothing to export yet.')),
+        );
+      }
+      return;
+    }
 
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        duration: Duration(seconds: 2),
-        content: Text('Magic Pen drawing saved to the current board.'),
-      ),
-    );
+    final boardProvider = context.read<BoardProvider>();
+    final bounds = _calculateExportBounds(boardProvider);
+    if (bounds == null) return;
+
+    final previousTransform = Matrix4.copy(_transformationController.value);
+    setState(() => _isExporting = true);
+
+    try {
+      await BoardExportService.exportToImage(
+        _boardExportKey,
+        transformationController: _transformationController,
+        contentBounds: bounds,
+        fileName: 'smart_board_${DateTime.now().millisecondsSinceEpoch}.png',
+      );
+
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          duration: Duration(seconds: 2),
+          content: Text('Whole board exported as PNG. Magic Pen remains active.'),
+        ),
+      );
+    } finally {
+      _transformationController.value = previousTransform;
+      if (mounted) setState(() => _isExporting = false);
+    }
   }
+
+  Rect? _calculateExportBounds(BoardProvider boardProvider) {
+    Rect? bounds;
+
+    for (final note in boardProvider.notes) {
+      final rect = Rect.fromLTWH(note.x, note.y, note.width, note.renderHeight);
+      bounds = bounds == null ? rect : bounds.expandToInclude(rect);
+    }
+
+    for (final point in _drawingPoints) {
+      if (point == null) continue;
+      final radius = point.paint.strokeWidth / 2 + 6;
+      final rect = Rect.fromCircle(center: point.offset, radius: radius);
+      bounds = bounds == null ? rect : bounds.expandToInclude(rect);
+    }
+
+    if (bounds == null) return null;
+    return bounds.inflate(50);
+  }
+
+  int mathMax(int a, int b) => a > b ? a : b;
 
   @override
   void dispose() {
     _focusNode.dispose();
     _transformationController.dispose();
+    _drawingRevision.dispose();
     super.dispose();
   }
 
@@ -204,15 +252,25 @@ class _CanvasScreenState extends State<CanvasScreen> {
 
     return Scaffold(
       backgroundColor: const Color(0xFF141414),
-      body: CallbackShortcuts(
-        bindings: <ShortcutActivator, VoidCallback>{
-          const SingleActivator(LogicalKeyboardKey.keyV, control: true): _handlePaste,
-          const SingleActivator(LogicalKeyboardKey.keyV, meta: true): _handlePaste,
+      body: Focus(
+        focusNode: _focusNode,
+        autofocus: true,
+        onKeyEvent: (node, event) {
+          if (event is KeyDownEvent &&
+              event.logicalKey == LogicalKeyboardKey.keyV &&
+              (HardwareKeyboard.instance.isControlPressed ||
+                  HardwareKeyboard.instance.isMetaPressed)) {
+            // Never steal Ctrl/Cmd+V from a focused TextField. Native text
+            // editing, including title/body paste, must remain untouched.
+            if (FocusManager.instance.primaryFocus != _focusNode) {
+              return KeyEventResult.ignored;
+            }
+            _handlePaste();
+            return KeyEventResult.handled;
+          }
+          return KeyEventResult.ignored;
         },
-        child: Focus(
-          focusNode: _focusNode,
-          autofocus: true,
-          child: Column(
+        child: Column(
             children: [
               // Top Bar Toolkit
               Container(
@@ -340,6 +398,53 @@ class _CanvasScreenState extends State<CanvasScreen> {
                         ),
                       ),
                     ),
+                    if (_isPenActive) ...[
+                      const SizedBox(width: 10),
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF172329),
+                          borderRadius: BorderRadius.circular(8),
+                          border: Border.all(color: Colors.cyanAccent.withOpacity(0.45)),
+                        ),
+                        child: const Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(Icons.gesture, size: 14, color: Colors.cyanAccent),
+                            SizedBox(width: 6),
+                            Text(
+                              'Magic Pen Active · canvas locked',
+                              style: TextStyle(color: Colors.cyanAccent, fontSize: 11, fontWeight: FontWeight.bold),
+                            ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(width: 4),
+                      IconButton(
+                        tooltip: _isPenEraser ? 'Switch to pen' : 'Rubber / eraser',
+                        onPressed: () => setState(() => _isPenEraser = !_isPenEraser),
+                        icon: Icon(
+                          Icons.auto_fix_high,
+                          size: 17,
+                          color: _isPenEraser ? Colors.orangeAccent : Colors.white70,
+                        ),
+                      ),
+                      IconButton(
+                        tooltip: 'Clear drawing',
+                        onPressed: _clearDrawing,
+                        icon: const Icon(Icons.delete_sweep_outlined, size: 17, color: Colors.redAccent),
+                      ),
+                      ElevatedButton.icon(
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: Colors.green,
+                          foregroundColor: Colors.white,
+                          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                        ),
+                        onPressed: _saveDrawing,
+                        icon: const Icon(Icons.save_outlined, size: 15),
+                        label: const Text('Save PNG', style: TextStyle(fontSize: 11)),
+                      ),
+                    ],
                     const SizedBox(width: 8),
 
                     ElevatedButton.icon(
@@ -430,113 +535,89 @@ class _CanvasScreenState extends State<CanvasScreen> {
               Expanded(
                 child: Stack(
                   children: [
-                    InteractiveBoard(transformationController: _transformationController),
-                    Positioned(
-                      right: 20,
-                      bottom: 20,
-                      child: ZoomControls(transformationController: _transformationController),
-                    ),
-                    if (_isPenActive) ...[
-                      Positioned.fill(
-                        child: Listener(
-                          behavior: HitTestBehavior.opaque,
-                          onPointerDown: (event) => _beginPenStroke(event.localPosition),
-                          onPointerMove: (event) => _movePen(event.localPosition),
-                          onPointerUp: (_) => _endPenStroke(),
-                          onPointerCancel: (_) => _endPenStroke(),
-                          child: CustomPaint(
-                            painter: _MagicPenPainter(points: _drawingPoints),
+                    // Export only the actual board layers. Pen controls and
+                    // zoom controls intentionally stay outside this boundary.
+                    RepaintBoundary(
+                      key: _boardExportKey,
+                      child: Stack(
+                        children: [
+                          InteractiveBoard(
+                            transformationController: _transformationController,
+                            interactionLocked: _isPenActive,
+                            overlay: Stack(
+                              children: [
+                                Positioned.fill(
+                                  child: IgnorePointer(
+                                    child: CustomPaint(
+                                      painter: _MagicPenPainter(
+                                        points: _drawingPoints,
+                                        repaint: _drawingRevision,
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                                if (_isPenActive)
+                                  Positioned.fill(
+                                    child: Listener(
+                                      behavior: HitTestBehavior.opaque,
+                                      onPointerDown: (event) => _beginPenStroke(event.localPosition),
+                                      onPointerMove: (event) => _movePen(event.localPosition),
+                                      onPointerUp: (_) => _endPenStroke(),
+                                      onPointerCancel: (_) => _endPenStroke(),
+                                      child: const SizedBox.expand(),
+                                    ),
+                                  ),
+                              ],
+                            ),
                           ),
-                        ),
+                        ],
                       ),
-                      // A very light visual veil makes it obvious that the
-                      // canvas is in drawing mode without hiding the work.
+                    ),
+                    if (_isExporting)
                       Positioned.fill(
-                        child: IgnorePointer(
-                          child: Container(
-                            color: Colors.cyanAccent.withOpacity(0.025),
-                            child: Align(
-                              alignment: Alignment.topCenter,
-                              child: Container(
-                                margin: const EdgeInsets.only(top: 12),
-                                padding: const EdgeInsets.symmetric(
-                                  horizontal: 14,
-                                  vertical: 8,
-                                ),
-                                decoration: BoxDecoration(
-                                  color: const Color(0xDD172329),
-                                  borderRadius: BorderRadius.circular(10),
-                                  border: Border.all(
-                                    color: Colors.cyanAccent.withOpacity(0.45),
+                        child: ColoredBox(
+                          color: Colors.black54,
+                          child: Center(
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 20),
+                              decoration: BoxDecoration(
+                                color: const Color(0xFF252526),
+                                borderRadius: BorderRadius.circular(14),
+                                border: Border.all(color: Colors.blueAccent.withOpacity(0.45)),
+                                boxShadow: const [BoxShadow(color: Colors.black54, blurRadius: 18)],
+                              ),
+                              child: const Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  SizedBox(
+                                    width: 22,
+                                    height: 22,
+                                    child: CircularProgressIndicator(strokeWidth: 2.5),
                                   ),
-                                ),
-                                child: const Text(
-                                  'MAGIC PEN ACTIVE  •  canvas locked for drawing',
-                                  style: TextStyle(
-                                    color: Colors.cyanAccent,
-                                    fontSize: 11,
-                                    fontWeight: FontWeight.bold,
+                                  SizedBox(width: 14),
+                                  Text(
+                                    'Preparing whole-board PNG…',
+                                    style: TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.w600),
                                   ),
-                                ),
+                                ],
                               ),
                             ),
                           ),
                         ),
                       ),
-                      Positioned(
-                        right: 20,
-                        top: 18,
-                        child: Material(
-                          color: const Color(0xEE1E2328),
-                          borderRadius: BorderRadius.circular(10),
-                          child: Padding(
-                            padding: const EdgeInsets.all(6),
-                            child: Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                IconButton(
-                                  tooltip: _isPenEraser ? 'Pen' : 'Rubber / Eraser',
-                                  onPressed: () => setState(
-                                    () => _isPenEraser = !_isPenEraser,
-                                  ),
-                                  icon: Icon(
-                                    Icons.auto_fix_high,
-                                    color: _isPenEraser
-                                        ? Colors.orangeAccent
-                                        : Colors.white70,
-                                  ),
-                                ),
-                                IconButton(
-                                  tooltip: 'Erase all drawing',
-                                  onPressed: _clearDrawing,
-                                  icon: const Icon(
-                                    Icons.delete_sweep_outlined,
-                                    color: Colors.redAccent,
-                                  ),
-                                ),
-                                const SizedBox(width: 4),
-                                ElevatedButton.icon(
-                                  style: ElevatedButton.styleFrom(
-                                    backgroundColor: Colors.green,
-                                    foregroundColor: Colors.white,
-                                  ),
-                                  onPressed: _saveDrawing,
-                                  icon: const Icon(Icons.save_outlined, size: 16),
-                                  label: const Text('Save'),
-                                ),
-                              ],
-                            ),
-                          ),
-                        ),
+                    Positioned(
+                      right: 20,
+                      bottom: 20,
+                      child: ZoomControls(
+                        transformationController: _transformationController,
                       ),
-                    ],
+                    ),
                   ],
                 ),
               ),
             ],
           ),
         ),
-      ),
     );
   }
 }
@@ -615,20 +696,49 @@ class _EditableTabTitleState extends State<_EditableTabTitle> {
 class _MagicPenPainter extends CustomPainter {
   final List<DrawingPoint?> points;
 
-  const _MagicPenPainter({required this.points});
+  const _MagicPenPainter({required this.points, Listenable? repaint}) : super(repaint: repaint);
 
   @override
   void paint(Canvas canvas, Size size) {
-    for (var i = 0; i < points.length - 1; i++) {
-      final a = points[i];
-      final b = points[i + 1];
-      if (a != null && b != null) {
-        canvas.drawLine(a.offset, b.offset, a.paint);
+    final stroke = <DrawingPoint>[];
+
+    void drawStroke() {
+      if (stroke.isEmpty) return;
+
+      final paint = Paint()
+        ..color = stroke.first.paint.color
+        ..strokeCap = StrokeCap.round
+        ..strokeJoin = StrokeJoin.round
+        ..strokeWidth = stroke.first.paint.strokeWidth
+        ..style = PaintingStyle.stroke;
+
+      if (stroke.length == 1) {
+        canvas.drawCircle(
+          stroke.first.offset,
+          paint.strokeWidth / 2,
+          paint..style = PaintingStyle.fill,
+        );
+        return;
+      }
+
+      final path = Path()..moveTo(stroke.first.offset.dx, stroke.first.offset.dy);
+      for (var i = 1; i < stroke.length; i++) {
+        path.lineTo(stroke[i].offset.dx, stroke[i].offset.dy);
+      }
+      canvas.drawPath(path, paint);
+      stroke.clear();
+    }
+
+    for (final point in points) {
+      if (point == null) {
+        drawStroke();
+      } else {
+        stroke.add(point);
       }
     }
+    drawStroke();
   }
 
   @override
-  bool shouldRepaint(covariant _MagicPenPainter oldDelegate) =>
-      identical(points, oldDelegate.points) || points != oldDelegate.points;
+  bool shouldRepaint(covariant _MagicPenPainter oldDelegate) => false;
 }

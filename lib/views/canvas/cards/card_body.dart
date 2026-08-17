@@ -96,6 +96,107 @@ class _CardBodyState extends State<CardBody> {
     });
   }
 
+  Future<void> _showCustomHighlightPicker() async {
+    final existing = widget.note.highlightColor ?? Colors.white;
+    final existingHsv = HSVColor.fromColor(existing);
+    var hue = existingHsv.hue;
+    var saturation = existingHsv.saturation;
+    var value = existingHsv.value;
+
+    final selected = await showDialog<Color?>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialogState) {
+          final color = HSVColor.fromAHSV(1, hue, saturation, value).toColor();
+
+          return AlertDialog(
+            backgroundColor: const Color(0xFF252526),
+            title: const Text('Choose Note Color', style: TextStyle(color: Colors.white)),
+            content: SizedBox(
+              width: 320,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Container(
+                    height: 64,
+                    width: double.infinity,
+                    decoration: BoxDecoration(
+                      color: color,
+                      borderRadius: BorderRadius.circular(10),
+                      border: Border.all(color: Colors.white24),
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  _colorSlider(
+                    label: 'Hue',
+                    value: hue,
+                    min: 0,
+                    max: 360,
+                    onChanged: (v) => setDialogState(() => hue = v),
+                  ),
+                  _colorSlider(
+                    label: 'Saturation',
+                    value: saturation,
+                    min: 0,
+                    max: 1,
+                    onChanged: (v) => setDialogState(() => saturation = v),
+                  ),
+                  _colorSlider(
+                    label: 'Brightness',
+                    value: value,
+                    min: 0,
+                    max: 1,
+                    onChanged: (v) => setDialogState(() => value = v),
+                  ),
+                ],
+              ),
+            ),
+            actions: [
+              TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+              ElevatedButton(
+                onPressed: () => Navigator.pop(ctx, color),
+                child: const Text('Apply'),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+
+    if (selected != null && mounted) {
+      context.read<BoardProvider>().setNoteHighlight(widget.note.id, selected.value);
+    }
+  }
+
+  Widget _colorSlider({
+    required String label,
+    required double value,
+    required double min,
+    required double max,
+    required ValueChanged<double> onChanged,
+  }) {
+    return Row(
+      children: [
+        SizedBox(
+          width: 78,
+          child: Text(label, style: const TextStyle(color: Colors.white70, fontSize: 11)),
+        ),
+        Expanded(
+          child: Slider(
+            value: value,
+            min: min,
+            max: max,
+            onChanged: onChanged,
+          ),
+        ),
+      ],
+    );
+  }
+
+  void _clearHighlight() {
+    context.read<BoardProvider>().setNoteHighlight(widget.note.id, null);
+  }
+
   @override
   Widget build(BuildContext context) {
     return Column(
@@ -137,6 +238,36 @@ class _CardBodyState extends State<CardBody> {
                 onPressed: _pasteIntoNote,
               ),
               const Spacer(),
+              PopupMenuButton<String>(
+                icon: Icon(
+                  Icons.palette_outlined,
+                  size: 15,
+                  color: widget.note.highlightColor != null ? Colors.amber : Colors.grey,
+                ),
+                tooltip: 'Highlight Note',
+                onSelected: (value) {
+                  switch (value) {
+                    case 'RED':
+                      context.read<BoardProvider>().setNoteHighlight(widget.note.id, Colors.red.shade700.value);
+                      break;
+                    case 'GREEN':
+                      context.read<BoardProvider>().setNoteHighlight(widget.note.id, Colors.green.shade700.value);
+                      break;
+                    case 'CUSTOM':
+                      _showCustomHighlightPicker();
+                      break;
+                    case 'CLEAR':
+                      _clearHighlight();
+                      break;
+                  }
+                },
+                itemBuilder: (_) => const [
+                  PopupMenuItem(value: 'RED', child: Text('Red')),
+                  PopupMenuItem(value: 'GREEN', child: Text('Green')),
+                  PopupMenuItem(value: 'CUSTOM', child: Text('Custom...')),
+                  PopupMenuItem(value: 'CLEAR', child: Text('Clear Highlight')),
+                ],
+              ),
               // Status Emoji Picker with Instant Board Provider Dispatch
               PopupMenuButton<String>(
                 icon: Icon(Icons.add_reaction_outlined, size: 15, color: widget.note.statusBadge != null ? Colors.amber : Colors.grey),
